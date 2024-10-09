@@ -1,0 +1,80 @@
+trigger:
+- main
+
+pool:
+  name: dexter
+  demands:
+  - agent.name -equals dexter
+
+variables:
+  imagePullSecret: 'responsivewebsite-auth'
+
+stages:
+- stage: "Build"
+  displayName: Build
+  jobs:
+  - job: "Build"
+    displayName: Build
+    steps:
+    - task: CmdLine@2
+      inputs:
+        script: 'gradle sonarqube -Dsonar.qualitygate.wait=true -Dsonar.host.url=http://20.XXX.XX.XX:9000 -Dsonar.login=squ_0XXX90XXXXXXXXXXXXXXXX93XXXXXXXXXXXXXXX'
+    - task: CmdLine@2
+      inputs:
+        script: 'gradle build'
+- stage: OwaspDependencyCheck
+  displayName: OwaspDependencyCheck
+  dependsOn: "Build"
+  jobs:
+  - job: OwaspDependdencyCheck
+    displayName: OwaspDependencyCheck
+    steps:
+    - checkout: none
+    - task: CmdLine@2
+      inputs:
+        script: 'dependency-check.sh --disableYarnAudit --disableNodeAudit --scan . --out .'
+- stage: DockerImageBuild
+  displayName: DockerImageBuild
+  dependsOn: "OwaspDependencyCheck"
+  jobs:
+  - job: DockerImageBuild
+    displayName: DockerImageBuild
+    steps:
+    - checkout: none
+    - task: CmdLine@2
+      inputs:
+        script: |
+          docker system prune -f --all
+          docker build -t responsivewebsitecontainer24registry.azurecr.io/samplewebapp:$(Build.BuildId) .
+          trivy image --exit-code 0 --severity MEDIUM,HIGH responsivewebsitecontainer24registry.azurecr.io/samplewebapp:$(Build.BuildId)
+          #trivy image --exit-code 1 --severity CRITICAL responsivewebsitecontainer24registry.azurecr.io/samplewebapp:$(Build.BuildId)
+    - task: Docker@2
+      inputs:
+        containerRegistry: 'Docker-Registry-Service-Connection'
+        repository: 'samplewebapp'
+        command: 'buildAndPush'
+        Dockerfile: '**/Dockerfile'
+- stage: KubernetesDeployment
+  displayName: KubernetesDeployment
+  dependsOn: DockerImageBuild
+  jobs:
+  - deployment: KubernetesDeployment
+    displayName: KubernetesDeployment
+    environment: "dev"
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: none 
+          - task: HelmDeploy@1
+            inputs:
+              connectionType: 'Azure Resource Manager'
+              azureSubscription: 'Azure DevOps Service Connection'
+              azureResourceGroup: 'responsivewebsite-rg'
+              kubernetesCluster: 'responsivewebsite-cluster'
+              namespace: 'responsive-website'
+              command: 'upgrade'
+              chartType: 'FilePath'
+              chartPath: '/home/demo/helm-repo-for-ArgoCD/folo'
+              releaseName: 'responsive-website'
+              overrideValues: 'imagePullSecrets[0].name=responsivewebsite-auth,image.repository=responsivewebsitecontainer24registry.azurecr.io/samplewebapp,image.tag=$(Build.BuildId),replicaCount=1,service.type=ClusterIP,service.port=80'
